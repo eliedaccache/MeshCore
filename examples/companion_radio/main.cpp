@@ -1,6 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#include <helpers/ChannelDetails.h>
 
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
@@ -151,7 +152,9 @@ void setup() {
   );
 
 #ifdef BLE_PIN_CODE
-  serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  char dev_name[32+16];
+  sprintf(dev_name, "%s%s", BLE_NAME_PREFIX, the_mesh.getNodeName());
+  serial_interface.begin(dev_name, the_mesh.getBLEPin());
 #else
   serial_interface.begin(Serial);
 #endif
@@ -197,7 +200,9 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PWD);
   serial_interface.begin(TCP_PORT);
 #elif defined(BLE_PIN_CODE)
-  serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  char dev_name[32+16];
+  sprintf(dev_name, "%s%s", BLE_NAME_PREFIX, the_mesh.getNodeName());
+  serial_interface.begin(dev_name, the_mesh.getBLEPin());
 #elif defined(SERIAL_RX)
   companion_serial.setPins(SERIAL_RX, SERIAL_TX);
   companion_serial.begin(115200);
@@ -212,6 +217,21 @@ void setup() {
 
   sensors.begin();
 
+  // List all configured channels at startup
+  Serial.println("=== Configured Channels ===");
+  {
+    ChannelDetails ch;
+    int found = 0;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      if (the_mesh.getChannel(i, ch) && ch.name[0] != '\0') {
+        Serial.printf("  [%d] '%s'\n", i, ch.name);
+        found++;
+      }
+    }
+    if (found == 0) Serial.println("  (none)");
+    Serial.println("===========================");
+  }
+
 #ifdef DISPLAY_CLASS
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
@@ -220,6 +240,36 @@ void setup() {
 void loop() {
   the_mesh.loop();
   sensors.loop();
+
+  // Send C6 alerts to first non-empty channel
+  // To target a specific channel by name, uncomment and edit the strcmp line below
+  if (sensors.c6_alert_pending) {
+    sensors.c6_alert_pending = false;
+    bool sent = false;
+    ChannelDetails ch;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      if (the_mesh.getChannel(i, ch) && ch.name[0] != '\0') {
+        // if (strcmp(ch.name, "Alerts") != 0) continue;
+        if (the_mesh.sendGroupMessage(
+          rtc_clock.getCurrentTime(),
+          ch.channel,
+          the_mesh.getNodeName(),
+          sensors.c6_alert,
+          strlen(sensors.c6_alert)
+        )) {
+          Serial.printf("[C6] ALERT sent to channel[%d] '%s': %s\n", i, ch.name, sensors.c6_alert);
+        } else {
+          Serial.printf("[C6] ALERT failed to send on channel[%d]\n", i);
+        }
+        sent = true;
+        break;
+      }
+    }
+    if (!sent) {
+      Serial.println("[C6] ALERT dropped: no channel configured");
+    }
+  }
+
 #ifdef DISPLAY_CLASS
   ui_task.loop();
 #endif

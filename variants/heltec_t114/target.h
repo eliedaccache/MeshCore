@@ -23,9 +23,24 @@ class T114SensorManager : public SensorManager {
   bool gps_detected = false;
   LocationProvider* _location;
 
+  // C6 UART line buffer
+  char c6_buf[128];
+  uint8_t c6_pos = 0;
+  void handleC6Line(const char* line);
+
   void start_gps();
   void stop_gps();
 public:
+  // C6 sensor values
+  float c6_temperature = 0;
+  float c6_humidity = 0;
+  float c6_pressure = 0;
+  bool  c6_data_valid = false;
+
+  // Pending alert for mesh to send
+  char  c6_alert[128];
+  bool  c6_alert_pending = false;
+
   T114SensorManager(LocationProvider &location): _location(&location) { }
   bool begin() override;
   bool querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) override;

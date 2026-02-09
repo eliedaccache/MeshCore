@@ -61,6 +61,7 @@ void T114SensorManager::stop_gps() {
 
 bool T114SensorManager::begin() {
   Serial1.begin(9600);
+  Serial2.begin(115200);  // C6 UART on pins 9/10
 
   // Try to detect if GPS is physically connected to determine if we should expose the setting
   pinMode(GPS_EN, OUTPUT);
@@ -86,10 +87,73 @@ bool T114SensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& 
   if (requester_permissions & TELEM_PERM_LOCATION) {   // does requester have permission?
     telemetry.addGPS(TELEM_CHANNEL_SELF, node_lat, node_lon, node_altitude);
   }
+  if (c6_data_valid && (requester_permissions & TELEM_PERM_ENVIRONMENT)) {
+    telemetry.addTemperature(TELEM_CHANNEL_SELF, c6_temperature);
+    telemetry.addRelativeHumidity(TELEM_CHANNEL_SELF, c6_humidity);
+    telemetry.addBarometricPressure(TELEM_CHANNEL_SELF, c6_pressure);
+  }
   return true;
 }
 
+void T114SensorManager::handleC6Line(const char* line) {
+  Serial.print("[C6 RX] ");
+  Serial.println(line);
+
+  if (strncmp(line, "DATA:", 5) == 0) {
+    const char* p = line + 5;
+    while (*p) {
+      if (p[0] == 'T' && p[1] == ':') c6_temperature = atof(p + 2);
+      else if (p[0] == 'H' && p[1] == ':') c6_humidity = atof(p + 2);
+      else if (p[0] == 'P' && p[1] == ':') c6_pressure = atof(p + 2);
+      while (*p && *p != ',') p++;
+      if (*p == ',') p++;
+    }
+    c6_data_valid = true;
+    Serial.printf("[C6] DATA: T=%.1f H=%.1f P=%.1f\n", c6_temperature, c6_humidity, c6_pressure);
+  }
+  else if (strncmp(line, "ALERT:", 6) == 0) {
+    strncpy(c6_alert, line + 6, sizeof(c6_alert) - 1);
+    c6_alert[sizeof(c6_alert) - 1] = '\0';
+    c6_alert_pending = true;
+    Serial.printf("[C6] ALERT queued: %s\n", c6_alert);
+  }
+  else if (strncmp(line, "CMD:", 4) == 0) {
+    const char* cmd = line + 4;
+    Serial.printf("[C6] CMD: %s\n", cmd);
+
+    if (strcmp(cmd, "PING") == 0) {
+      Serial2.println("RSP:PONG");
+    }
+    else if (strcmp(cmd, "STATUS") == 0) {
+      Serial2.printf("RSP:STATUS:T=%.1f,H=%.1f,P=%.1f,V=%.2f\n",
+        c6_temperature, c6_humidity, c6_pressure,
+        (float)board.getBattMilliVolts() / 1000.0f);
+    }
+    else if (strcmp(cmd, "BATT") == 0) {
+      Serial2.printf("RSP:BATT:%.2f\n", (float)board.getBattMilliVolts() / 1000.0f);
+    }
+    else {
+      Serial2.printf("RSP:ERR:unknown cmd '%s'\n", cmd);
+    }
+  }
+  else {
+    Serial.println("[C6] Unknown line format, ignored");
+  }
+}
+
 void T114SensorManager::loop() {
+  // Read C6 UART
+  while (Serial2.available()) {
+    char c = Serial2.read();
+    if (c == '\n') {
+      c6_buf[c6_pos] = '\0';
+      handleC6Line(c6_buf);
+      c6_pos = 0;
+    } else if (c != '\r' && c6_pos < sizeof(c6_buf) - 1) {
+      c6_buf[c6_pos++] = c;
+    }
+  }
+
   static long next_gps_update = 0;
 
   _location->loop();
